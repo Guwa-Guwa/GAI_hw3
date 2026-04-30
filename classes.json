@@ -1,0 +1,27 @@
+[
+    {
+        "concept": "Attribution Failure",
+        "concept_desc": "A claim lacks proper attribution, either crediting the wrong source or presenting information as fact without citation.",
+        "id": 0
+    },
+    {
+        "concept": "Entity",
+        "concept_desc": "A claim includes swapped, incorrectly specified, or inserted noun phrases (e.g. one named entity used in a context where another word is expected).",
+        "id": 1
+    },
+    {
+        "concept": "Number",
+        "concept_desc": "A claim has a different number than the original context (e.g. 20% vs. 0.7%). Any number, including year, dimensions, ages, etc.",
+        "id": 2
+    },
+    {
+        "concept": "Overgeneralization",
+        "concept_desc": "A claim is based on accurate contextual information but is too broad or too general to be supported by the context.",
+        "id": 3
+    },
+    {
+        "concept": "Temporal",
+        "concept_desc": "A claim does not accurately incorporate tense, modality (e.g. might vs. will), or time reference in relation to the context.",
+        "id": 4
+    }
+]
