@@ -1,2 +1,6 @@
 paper_evidence/
 results/
+checkpoint/
+outputs/
+results_500_100/
+*.pkl
