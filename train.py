@@ -13,7 +13,11 @@ from unsloth import FastLanguageModel
 from sentence_transformers import SentenceTransformer, util
 from transformers import TrainingArguments
 from trl import SFTTrainer, SFTConfig
+import wandb
+wandb.login()
 
+nltk.download('punkt')
+nltk.download('punkt_tab')
 
 # Configuration
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -41,23 +45,46 @@ def split_sentences(text):
     sentences = nltk.sent_tokenize(text)
     return [s.strip() for s in sentences if len(s.strip()) > 0]
 
-def build_sentence_chunks(sentences, max_words=120, overlap=2):
+def build_sentence_chunks(sentences, max_words=120, overlap_words=15):
+    """
+    基於句子進行 Chunking，但以「單字數」來控制 Overlap，
+    避免遇到超長句子時造成過度重複。
+    """
     chunks = []
-    current_chunk = []
-    current_len = 0
+    current_chunk_sentences = []
+    current_word_count = 0
+
     for sent in sentences:
-        sent_len = len(sent.split())
-        # 如果超過 chunk size → 先切
-        if current_len + sent_len > max_words:
-            if current_chunk:
-                chunks.append(" ".join(current_chunk))
-                # overlap：保留最後幾句（語意連續）
-                current_chunk = current_chunk[-overlap:]
-                current_len = sum(len(s.split()) for s in current_chunk)
-        current_chunk.append(sent)
-        current_len += sent_len
-    if current_chunk:
-        chunks.append(" ".join(current_chunk))
+        words = sent.split()
+        sent_word_count = len(words)
+        # 檢查加入這個句子是否會超過 max_words
+        if current_word_count + sent_word_count > max_words and current_chunk_sentences:
+            # 1. 儲存當前的 Chunk
+            chunks.append(" ".join(current_chunk_sentences))
+            # 2. 計算 Overlap (從 current_chunk 的後面往前抓句子，直到達到 overlap_words)
+            overlap_sentences = []
+            overlap_count = 0
+            # 反向走訪當前的句子列表
+            for s in reversed(current_chunk_sentences):
+                s_words = len(s.split())
+                if overlap_count + s_words <= overlap_words:
+                    overlap_sentences.insert(0, s) # 插入到前面保持順序
+                    overlap_count += s_words
+                else:
+                    # 如果加上這句會超過 overlap_words，我們也把它加進去確保語意不斷，
+                    # 但隨即停止抓取 (這樣能保證至少有一點 overlap，又不會抓太多)
+                    if not overlap_sentences: # 如果連一句都塞不下，硬塞最後一句
+                        overlap_sentences.insert(0, s)
+                    break
+            # 3. 開啟新的 Chunk，將 overlap 放進去
+            current_chunk_sentences = overlap_sentences
+            current_word_count = sum(len(s.split()) for s in current_chunk_sentences)
+        # 把目前的句子加入 Chunk
+        current_chunk_sentences.append(sent)
+        current_word_count += sent_word_count
+    # 處理最後一個剩下的 Chunk
+    if current_chunk_sentences:
+        chunks.append(" ".join(current_chunk_sentences))
     return chunks
 
 
@@ -79,7 +106,7 @@ def process_pdf_to_chunks(pdf_path, paper_id):
         chunks = build_sentence_chunks(
             sentences,
             max_words=120,
-            overlap=2
+            overlap_words=15
         )
         if not chunks:
             chunks = [full_text[:1000]]
@@ -92,6 +119,7 @@ def process_pdf_to_chunks(pdf_path, paper_id):
 def retrieve_top_k_evidence(paper_id, sentence, top_k=TOP_K):
     try:
         chunks = CHUNK_POOL.get(paper_id, [])
+        # print(f"[DEBUG] Retrieving evidence for paper_id: {paper_id}, sentence: {sentence[:30]}..., number of chunks: {len(chunks)}")
         if not chunks:
             return "查無論文證據內容"
         texts = [c["text"] for c in chunks] # list of chunk texts(str)
@@ -107,8 +135,8 @@ def retrieve_top_k_evidence(paper_id, sentence, top_k=TOP_K):
 
         bm25_candidates = [texts[i] for i in top_idx]
 
-        query_emb = EMBED_MODEL.encode(sentence, convert_to_tensor=True)
-        cand_embs = EMBED_MODEL.encode(bm25_candidates, convert_to_tensor=True)
+        query_emb = EMBED_MODEL.encode(sentence, convert_to_tensor=True, show_progress_bar=False)
+        cand_embs = EMBED_MODEL.encode(bm25_candidates, convert_to_tensor=True, show_progress_bar=False)
 
         sim = util.cos_sim(query_emb, cand_embs)[0]
 
@@ -183,6 +211,7 @@ def formatting_prompts_func(examples):
 
 
 def main():
+    global CHUNK_POOL, BM25_POOL
     # Prepare training data
     # Get data classes from JSON
     with open("classes.json", "r") as f:
@@ -206,7 +235,6 @@ def main():
             CHUNK_POOL = json.load(f)
     else:
         print("Processing PDFs to build chunk pool...")
-        CHUNK_POOL = {}
         for paper_id in tqdm(train_df['paper_id'].unique(), desc="Processing PDFs"):
             pdf_path = f"paper_evidence/train/{paper_id}.pdf"
             if os.path.exists(pdf_path):
@@ -226,8 +254,8 @@ def main():
         print(f"✅ Chunk pool 已建立並儲存至 {CHUNKS_OUTPUT}！")
 
     for paper_id, chunks in tqdm(CHUNK_POOL.items(), desc="Building BM25 indexes"):
-        texts = [c["text"] for c in chunks]
-        tokenized_text = [t.lower().split() for t in texts]
+        texts = [c["text"] for c in chunks] # chunk : list of dict with keys "chunk_id" and "text"
+        tokenized_text = [t.lower().split() for t in texts] # list of list of tokens
         BM25_POOL[paper_id] = BM25Okapi(tokenized_text)
 
     # retrieve evidence for each training sample
@@ -236,7 +264,8 @@ def main():
         # read pickle file if exists
         train_df = pd.read_pickle(EVIDENCE_OUTPUT)
     else:
-        train_df['evidence'] = train_df.apply(
+        tqdm.pandas()
+        train_df['evidence'] = train_df.progress_apply(
             lambda row: retrieve_top_k_evidence(
                 row['paper_id'], 
                 row['text'], 
@@ -256,8 +285,16 @@ def main():
     # Hugging Face Dataset preparation
     dataset = Dataset.from_pandas(processed_df)
     print(f"[DEBUG] Dataset after preprocessing: {dataset[:3]}")  # Print three example of the dataset
+   
     # Prompt formatting
     train_dataset = dataset.map(formatting_prompts_func, batched=True)
+
+    print("Splitting dataset into train and validation sets...")
+    split_dataset = train_dataset.train_test_split(test_size=0.1, seed=42)
+    
+    final_train_dataset = split_dataset['train']
+    final_eval_dataset = split_dataset['test']
+    print(f"訓練集筆數: {len(final_train_dataset)}, 驗證集筆數: {len(final_eval_dataset)}")
 
     # 1. Load model and tokenizer
     print("Loading model and tokenizer...")
@@ -300,16 +337,28 @@ def main():
         output_dir = OUTPUT_DIR,
         max_seq_length = MAX_SEQ_LENGTH,
         seed = 42,
+
+        eval_strategy = "steps",        # 每隔幾步進行一次驗證
+        eval_steps = 50,                # 假設每 50 步驗證一次 (可視總步數調整)
+        save_strategy = "steps",        # 儲存策略必須和 eval 一致
+        save_steps = 50,                # 每 50 步存一個 checkpoint 資料夾
+        load_best_model_at_end = True,  # 訓練結束後，自動載入 eval_loss 最低的模型！
+        metric_for_best_model = "eval_loss",
+        greater_is_better = False,      # eval_loss 是越低越好
     )
 
     # 使用我們客製化的 Trainer
     trainer = SFTTrainer(
         model = model,
         tokenizer = tokenizer,
-        train_dataset = train_dataset, # 你上一階段前處理完的 dataset
+        train_dataset = final_train_dataset, # 改用切分後的訓練集
+        eval_dataset = final_eval_dataset,   # 🌟 餵入驗證集
         dataset_text_field = "text",
         max_seq_length = MAX_SEQ_LENGTH,
         args = training_args,
+
+        report_to = "wandb",
+        run_name = "Qwen-3B-GAI-HW3-v1",
     )
 
     print("Starting training...")

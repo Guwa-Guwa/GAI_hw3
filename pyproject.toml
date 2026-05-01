@@ -12,4 +12,6 @@ dependencies = [
   "pymupdf",
   "sentence-transformers",
   "rank-bm25>=0.2.2",
+  "nltk>=3.9.4",
+  "wandb>=0.26.1",
 ]
