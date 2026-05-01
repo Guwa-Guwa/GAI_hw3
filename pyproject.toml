@@ -11,4 +11,5 @@ dependencies = [
   "accelerate==1.7.0",
   "pymupdf",
   "sentence-transformers",
+  "rank-bm25>=0.2.2",
 ]
