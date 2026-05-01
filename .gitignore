@@ -4,3 +4,4 @@ checkpoint/
 outputs/
 results_500_100/
 *.pkl
+unsloth_compiled_cache/
